@@ -1,0 +1,28 @@
+{
+	"geode": "4.0.0",
+	"gd": {
+		"win": "2.2081"
+	},
+	"version": "v1.0.0",
+	"id": "mario.autodeafen",
+	"name": "MarioAutoDeafen",
+	"developer": "Mario",
+	"description": "Автоматически нажимает клавишу Discord (Toggle Deafen) на выбранном проценте уровня.",
+	"settings": {
+		"undeafen-on-death": {
+			"type": "bool",
+			"name": "Включать звук при смерти",
+			"default": true
+		},
+		"undeafen-on-complete": {
+			"type": "bool",
+			"name": "Включать звук при прохождении уровня",
+			"default": true
+		},
+		"practice-mode": {
+			"type": "bool",
+			"name": "Работать в практике",
+			"default": false
+		}
+	}
+}
