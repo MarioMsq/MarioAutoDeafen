@@ -60,7 +60,7 @@ namespace ad {
 		if (b.alt) s += "Alt+";
 		auto name = CCKeyboardDispatcher::get()->keyToString(static_cast<enumKeyCodes>(b.key));
 		if (name && name[0]) s += name;
-		else s += fmt::format("Key {}", b.key);
+		else s += "Key " + std::to_string(b.key);
 		return s;
 	}
 
@@ -116,12 +116,13 @@ namespace ad {
 // ============================================================
 //  Попап настроек
 // ============================================================
-class AutoDeafenPopup : public Popup<> {
+class AutoDeafenPopup : public Popup {
 protected:
 	ButtonSprite* m_keySpr = nullptr;
 	bool m_capturing = false;
 
-	bool setup() override {
+	bool init() {
+		if (!Popup::init(300.f, 220.f)) return false;
 		this->setTitle("Mario Auto Deafen");
 		this->setKeyboardEnabled(true);
 
@@ -227,7 +228,7 @@ public:
 
 	static AutoDeafenPopup* create() {
 		auto ret = new AutoDeafenPopup();
-		if (ret->initAnchored(300.f, 220.f)) {
+		if (ret->init()) {
 			ret->autorelease();
 			return ret;
 		}
