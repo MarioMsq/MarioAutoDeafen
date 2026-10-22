@@ -5,6 +5,8 @@ set(CMAKE_CXX_VISIBILITY_PRESET hidden)
 
 project(MarioAutoDeafen VERSION 1.0.0)
 
+add_compile_definitions(FMT_USE_CONSTEVAL=0)
+
 file(GLOB SOURCES src/*.cpp)
 add_library(${PROJECT_NAME} SHARED ${SOURCES})
 
