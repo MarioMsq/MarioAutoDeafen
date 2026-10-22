@@ -16,6 +16,9 @@ jobs:
             os: windows-latest
     name: ${{ matrix.config.name }}
     runs-on: ${{ matrix.config.os }}
+    env:
+      # Обход ошибки библиотеки fmt на новом компиляторе
+      CXXFLAGS: "-DFMT_USE_CONSTEVAL=0 -DFMT_CONSTEVAL="
     steps:
       - uses: actions/checkout@v4
 
