@@ -16,11 +16,16 @@ jobs:
             os: windows-latest
     name: ${{ matrix.config.name }}
     runs-on: ${{ matrix.config.os }}
-    env:
-      # Обход ошибки библиотеки fmt на новом компиляторе
-      CXXFLAGS: "-DFMT_USE_CONSTEVAL=0 -DFMT_CONSTEVAL="
     steps:
       - uses: actions/checkout@v4
+
+      # На сервере стоит слишком новый компилятор Clang 20, с которым не собирается
+      # библиотека fmt из Geode. Ставим Clang 19.
+      - name: Install Clang 19
+        shell: pwsh
+        run: |
+          choco install llvm --version=19.1.7 --allow-downgrade --force -y --no-progress
+          & "C:\Program Files\LLVM\bin\clang.exe" --version
 
       - name: Build the mod
         uses: geode-sdk/build-geode-mod@main
