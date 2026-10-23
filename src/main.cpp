@@ -34,6 +34,7 @@ namespace ad {
 	inline bool enabled() { return Mod::get()->getSavedValue<bool>("enabled", false); }
 	inline int percent() { return Mod::get()->getSavedValue<int>("percent", 50); }
 	inline bool undeafenEnabled() { return Mod::get()->getSavedValue<bool>("undeafen-enabled", false); }
+	inline bool startposEnabled() { return Mod::get()->getSavedValue<bool>("startpos", false); }
 	inline int undeafenPercent() { return Mod::get()->getSavedValue<int>("undeafen-percent", 80); }
 
 	inline Bind getBind() {
@@ -152,7 +153,7 @@ protected:
 	}
 
 	bool init() {
-		if (!Popup::init(300.f, 270.f)) return false;
+		if (!Popup::init(300.f, 300.f)) return false;
 		this->setTitle("Mario Auto Deafen");
 		this->setKeyboardEnabled(true);
 
@@ -161,8 +162,8 @@ protected:
 			this, menu_selector(AutoDeafenPopup::onToggle), 0.7f
 		);
 		toggler->toggle(ad::enabled());
-		m_buttonMenu->addChildAtPosition(toggler, Anchor::Center, {-110.f, 75.f});
-		this->addLabel("Enabled", 75.f);
+		m_buttonMenu->addChildAtPosition(toggler, Anchor::Center, {-110.f, 95.f});
+		this->addLabel("Enabled", 95.f);
 
 		// --- Клавиша ---
 		m_keySpr = ButtonSprite::create(
@@ -170,25 +171,33 @@ protected:
 			190, true, "bigFont.fnt", "GJ_button_04.png", 30.f, 0.6f
 		);
 		auto keyBtn = CCMenuItemSpriteExtra::create(m_keySpr, this, menu_selector(AutoDeafenPopup::onKeyBtn));
-		m_buttonMenu->addChildAtPosition(keyBtn, Anchor::Center, {0.f, 35.f});
+		m_buttonMenu->addChildAtPosition(keyBtn, Anchor::Center, {0.f, 60.f});
 
 		// --- Процент, с которого включается deafen ---
-		this->addLabel("Deafen at", -5.f);
-		this->addPercentInput(-5.f, "percent", ad::percent());
+		this->addLabel("Deafen at", 20.f);
+		this->addPercentInput(20.f, "percent", ad::percent());
 
 		// --- Процент, на котором звук возвращается (по желанию) ---
 		auto undeafenToggler = CCMenuItemToggler::createWithStandardSprites(
 			this, menu_selector(AutoDeafenPopup::onToggleUndeafen), 0.7f
 		);
 		undeafenToggler->toggle(ad::undeafenEnabled());
-		m_buttonMenu->addChildAtPosition(undeafenToggler, Anchor::Center, {-110.f, -45.f});
-		this->addLabel("Undeafen at", -45.f);
-		this->addPercentInput(-45.f, "undeafen-percent", ad::undeafenPercent());
+		m_buttonMenu->addChildAtPosition(undeafenToggler, Anchor::Center, {-110.f, -20.f});
+		this->addLabel("Undeafen at", -20.f);
+		this->addPercentInput(-20.f, "undeafen-percent", ad::undeafenPercent());
+
+		// --- Работать со стартпосов ---
+		auto startposToggler = CCMenuItemToggler::createWithStandardSprites(
+			this, menu_selector(AutoDeafenPopup::onToggleStartpos), 0.7f
+		);
+		startposToggler->toggle(ad::startposEnabled());
+		m_buttonMenu->addChildAtPosition(startposToggler, Anchor::Center, {-110.f, -60.f});
+		this->addLabel("Deafen on startpos", -60.f);
 
 		// --- Тест ---
 		auto testSpr = ButtonSprite::create("Test key", 100, true, "bigFont.fnt", "GJ_button_01.png", 30.f, 0.6f);
 		auto testBtn = CCMenuItemSpriteExtra::create(testSpr, this, menu_selector(AutoDeafenPopup::onTest));
-		m_buttonMenu->addChildAtPosition(testBtn, Anchor::Center, {0.f, -95.f});
+		m_buttonMenu->addChildAtPosition(testBtn, Anchor::Center, {0.f, -110.f});
 
 		return true;
 	}
@@ -207,6 +216,11 @@ protected:
 	void onToggleUndeafen(CCObject* sender) {
 		auto t = static_cast<CCMenuItemToggler*>(sender);
 		Mod::get()->setSavedValue<bool>("undeafen-enabled", !t->isToggled());
+	}
+
+	void onToggleStartpos(CCObject* sender) {
+		auto t = static_cast<CCMenuItemToggler*>(sender);
+		Mod::get()->setSavedValue<bool>("startpos", !t->isToggled());
 	}
 
 	void onKeyBtn(CCObject*) {
@@ -306,6 +320,7 @@ class $modify(AutoDeafenPlayLayer, PlayLayer) {
 
 		if (!ad::enabled()) return;
 		if (m_isTestMode) return;
+		if (m_startPosObject && !ad::startposEnabled()) return; // запуск со стартпоса
 		if (m_isPracticeMode && !Mod::get()->getSettingValue<bool>("practice-mode")) return;
 
 		float pct = this->getCurrentPercent();
