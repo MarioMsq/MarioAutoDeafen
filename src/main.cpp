@@ -33,6 +33,8 @@ namespace ad {
 
 	inline bool enabled() { return Mod::get()->getSavedValue<bool>("enabled", false); }
 	inline int percent() { return Mod::get()->getSavedValue<int>("percent", 50); }
+	inline bool undeafenEnabled() { return Mod::get()->getSavedValue<bool>("undeafen-enabled", false); }
+	inline int undeafenPercent() { return Mod::get()->getSavedValue<int>("undeafen-percent", 80); }
 
 	inline Bind getBind() {
 		auto m = Mod::get();
@@ -121,74 +123,90 @@ protected:
 	ButtonSprite* m_keySpr = nullptr;
 	bool m_capturing = false;
 
+	// Подпись слева (только латиница: шрифт chatFont не поддерживает кириллицу)
+	void addLabel(char const* text, float y) {
+		auto label = CCLabelBMFont::create(text, "chatFont.fnt");
+		label->setAnchorPoint({0.f, 0.5f});
+		label->setScale(0.9f);
+		m_mainLayer->addChildAtPosition(label, Anchor::Center, {-88.f, y});
+	}
+
+	// Поле для ввода процента + знак %
+	void addPercentInput(float y, std::string saveKey, int value) {
+		auto input = TextInput::create(60.f, "0-100", "bigFont.fnt");
+		input->setFilter("0123456789");
+		input->setMaxCharCount(3);
+		input->setString(std::to_string(value));
+		input->setCallback([saveKey](std::string const& text) {
+			if (text.empty()) return;
+			int v = 0;
+			try { v = std::stoi(text); } catch (...) { return; }
+			v = std::clamp(v, 0, 100);
+			Mod::get()->setSavedValue<int>(saveKey, v);
+		});
+		m_mainLayer->addChildAtPosition(input, Anchor::Center, {45.f, y});
+
+		auto sign = CCLabelBMFont::create("%", "bigFont.fnt");
+		sign->setScale(0.6f);
+		m_mainLayer->addChildAtPosition(sign, Anchor::Center, {92.f, y});
+	}
+
 	bool init() {
-		if (!Popup::init(300.f, 220.f)) return false;
+		if (!Popup::init(300.f, 270.f)) return false;
 		this->setTitle("Mario Auto Deafen");
 		this->setKeyboardEnabled(true);
 
-		// --- Включено / выключено ---
+		// --- Enabled ---
 		auto toggler = CCMenuItemToggler::createWithStandardSprites(
 			this, menu_selector(AutoDeafenPopup::onToggle), 0.7f
 		);
 		toggler->toggle(ad::enabled());
-		m_buttonMenu->addChildAtPosition(toggler, Anchor::Center, {-110.f, 70.f});
-
-		auto enLabel = CCLabelBMFont::create("Включить MarioAutoDeafen", "chatFont.fnt");
-		enLabel->setAnchorPoint({0.f, 0.5f});
-		enLabel->setScale(0.9f);
-		m_mainLayer->addChildAtPosition(enLabel, Anchor::Center, {-88.f, 70.f});
+		m_buttonMenu->addChildAtPosition(toggler, Anchor::Center, {-110.f, 75.f});
+		this->addLabel("Enabled", 75.f);
 
 		// --- Клавиша ---
-		auto keyLabel = CCLabelBMFont::create("Клавиша «Откл. звук» из Discord:", "chatFont.fnt");
-		keyLabel->setScale(0.8f);
-		m_mainLayer->addChildAtPosition(keyLabel, Anchor::Center, {0.f, 35.f});
-
 		m_keySpr = ButtonSprite::create(
-			ad::bindToString(ad::getBind()).c_str(), 190, true, "bigFont.fnt", "GJ_button_04.png", 30.f, 0.6f
+			("Key: " + ad::bindToString(ad::getBind())).c_str(),
+			190, true, "bigFont.fnt", "GJ_button_04.png", 30.f, 0.6f
 		);
 		auto keyBtn = CCMenuItemSpriteExtra::create(m_keySpr, this, menu_selector(AutoDeafenPopup::onKeyBtn));
-		m_buttonMenu->addChildAtPosition(keyBtn, Anchor::Center, {0.f, 5.f});
+		m_buttonMenu->addChildAtPosition(keyBtn, Anchor::Center, {0.f, 35.f});
 
-		// --- Процент ---
-		auto pctLabel = CCLabelBMFont::create("Нажимать с процента:", "chatFont.fnt");
-		pctLabel->setScale(0.8f);
-		pctLabel->setAnchorPoint({1.f, 0.5f});
-		m_mainLayer->addChildAtPosition(pctLabel, Anchor::Center, {10.f, -35.f});
+		// --- Процент, с которого включается deafen ---
+		this->addLabel("Deafen at", -5.f);
+		this->addPercentInput(-5.f, "percent", ad::percent());
 
-		auto input = TextInput::create(60.f, "0-100", "bigFont.fnt");
-		input->setFilter("0123456789");
-		input->setMaxCharCount(3);
-		input->setString(std::to_string(ad::percent()));
-		input->setCallback([](std::string const& text) {
-			if (text.empty()) return;
-			int value = 0;
-			try { value = std::stoi(text); } catch (...) { return; }
-			value = std::clamp(value, 0, 100);
-			Mod::get()->setSavedValue<int>("percent", value);
-		});
-		m_mainLayer->addChildAtPosition(input, Anchor::Center, {50.f, -35.f});
-
-		auto pctSign = CCLabelBMFont::create("%", "bigFont.fnt");
-		pctSign->setScale(0.6f);
-		m_mainLayer->addChildAtPosition(pctSign, Anchor::Center, {92.f, -35.f});
+		// --- Процент, на котором звук возвращается (по желанию) ---
+		auto undeafenToggler = CCMenuItemToggler::createWithStandardSprites(
+			this, menu_selector(AutoDeafenPopup::onToggleUndeafen), 0.7f
+		);
+		undeafenToggler->toggle(ad::undeafenEnabled());
+		m_buttonMenu->addChildAtPosition(undeafenToggler, Anchor::Center, {-110.f, -45.f});
+		this->addLabel("Undeafen at", -45.f);
+		this->addPercentInput(-45.f, "undeafen-percent", ad::undeafenPercent());
 
 		// --- Тест ---
 		auto testSpr = ButtonSprite::create("Test key", 100, true, "bigFont.fnt", "GJ_button_01.png", 30.f, 0.6f);
 		auto testBtn = CCMenuItemSpriteExtra::create(testSpr, this, menu_selector(AutoDeafenPopup::onTest));
-		m_buttonMenu->addChildAtPosition(testBtn, Anchor::Center, {0.f, -75.f});
+		m_buttonMenu->addChildAtPosition(testBtn, Anchor::Center, {0.f, -95.f});
 
 		return true;
 	}
 
 	void refreshKey() {
 		if (m_capturing) m_keySpr->setString("Press a key...");
-		else m_keySpr->setString(ad::bindToString(ad::getBind()).c_str());
+		else m_keySpr->setString(("Key: " + ad::bindToString(ad::getBind())).c_str());
 	}
 
 	void onToggle(CCObject* sender) {
 		// toggler вызывает callback ДО смены состояния, поэтому инвертируем
 		auto t = static_cast<CCMenuItemToggler*>(sender);
 		Mod::get()->setSavedValue<bool>("enabled", !t->isToggled());
+	}
+
+	void onToggleUndeafen(CCObject* sender) {
+		auto t = static_cast<CCMenuItemToggler*>(sender);
+		Mod::get()->setSavedValue<bool>("undeafen-enabled", !t->isToggled());
 	}
 
 	void onKeyBtn(CCObject*) {
@@ -286,13 +304,24 @@ class $modify(AutoDeafenPlayLayer, PlayLayer) {
 	void postUpdate(float dt) {
 		PlayLayer::postUpdate(dt);
 
-		if (!ad::enabled() || m_fields->triggered) return;
+		if (!ad::enabled()) return;
 		if (m_isTestMode) return;
 		if (m_isPracticeMode && !Mod::get()->getSettingValue<bool>("practice-mode")) return;
 
-		if (this->getCurrentPercent() >= static_cast<float>(ad::percent())) {
-			m_fields->triggered = true;
-			ad::deafen();
+		float pct = this->getCurrentPercent();
+
+		if (!m_fields->triggered) {
+			// включаем deafen, когда дошли до нужного процента
+			if (pct >= static_cast<float>(ad::percent())) {
+				m_fields->triggered = true;
+				ad::deafen();
+			}
+		}
+		else if (ad::g_deafened && ad::undeafenEnabled()
+			&& ad::undeafenPercent() > ad::percent()
+			&& pct >= static_cast<float>(ad::undeafenPercent())) {
+			// возвращаем звук на втором проценте
+			ad::undeafen();
 		}
 	}
 
