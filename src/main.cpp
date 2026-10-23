@@ -4,8 +4,10 @@
 #include <Geode/Geode.hpp>
 #include <Geode/modify/PlayLayer.hpp>
 #include <Geode/modify/PauseLayer.hpp>
+#include <Geode/modify/CCScheduler.hpp>
 #include <Geode/ui/Popup.hpp>
 #include <Geode/ui/TextInput.hpp>
+#include <Geode/ui/Notification.hpp>
 
 #ifdef GEODE_IS_WINDOWS
 #include <windows.h>
@@ -13,6 +15,7 @@
 
 #include <thread>
 #include <vector>
+#include <string>
 #include <algorithm>
 
 using namespace geode::prelude;
@@ -31,28 +34,30 @@ namespace ad {
 
 	inline bool g_deafened = false;
 
+	// ---------- сохранённые настройки ----------
 	inline bool enabled() { return Mod::get()->getSavedValue<bool>("enabled", false); }
 	inline int percent() { return Mod::get()->getSavedValue<int>("percent", 50); }
 	inline bool undeafenEnabled() { return Mod::get()->getSavedValue<bool>("undeafen-enabled", false); }
-	inline bool startposEnabled() { return Mod::get()->getSavedValue<bool>("startpos", false); }
 	inline int undeafenPercent() { return Mod::get()->getSavedValue<int>("undeafen-percent", 80); }
+	inline bool startposEnabled() { return Mod::get()->getSavedValue<bool>("startpos", true); }
 
-	inline Bind getBind() {
+	// prefix "" = клавиша Discord, prefix "toggle-" = клавиша вкл/выкл мода
+	inline Bind getBind(std::string const& prefix) {
 		auto m = Mod::get();
 		Bind b;
-		b.key = m->getSavedValue<int>("key", 0);
-		b.ctrl = m->getSavedValue<bool>("ctrl", false);
-		b.shift = m->getSavedValue<bool>("shift", false);
-		b.alt = m->getSavedValue<bool>("alt", false);
+		b.key = m->getSavedValue<int>(prefix + "key", 0);
+		b.ctrl = m->getSavedValue<bool>(prefix + "ctrl", false);
+		b.shift = m->getSavedValue<bool>(prefix + "shift", false);
+		b.alt = m->getSavedValue<bool>(prefix + "alt", false);
 		return b;
 	}
 
-	inline void setBind(Bind const& b) {
+	inline void setBind(std::string const& prefix, Bind const& b) {
 		auto m = Mod::get();
-		m->setSavedValue<int>("key", b.key);
-		m->setSavedValue<bool>("ctrl", b.ctrl);
-		m->setSavedValue<bool>("shift", b.shift);
-		m->setSavedValue<bool>("alt", b.alt);
+		m->setSavedValue<int>(prefix + "key", b.key);
+		m->setSavedValue<bool>(prefix + "ctrl", b.ctrl);
+		m->setSavedValue<bool>(prefix + "shift", b.shift);
+		m->setSavedValue<bool>(prefix + "alt", b.alt);
 	}
 
 	inline std::string bindToString(Bind const& b) {
@@ -67,10 +72,10 @@ namespace ad {
 		return s;
 	}
 
-	// Нажимает сохранённую комбинацию (глобально, Discord её поймает как хоткей)
+	// ---------- нажатие клавиши Discord ----------
 	inline void pressBind() {
 #ifdef GEODE_IS_WINDOWS
-		auto b = getBind();
+		auto b = getBind("");
 		if (!b.key) return;
 
 		std::thread([b] {
@@ -114,15 +119,273 @@ namespace ad {
 		g_deafened = false;
 		pressBind();
 	}
+
+	// ---------- вкл/выкл мода по клавише ----------
+	inline void toggleEnabled() {
+		bool now = !enabled();
+		Mod::get()->setSavedValue<bool>("enabled", now);
+		if (!now) undeafen(); // выключили мод, пока звук отключён — возвращаем звук
+		Notification::create(
+			now ? "AutoDeafen: ON" : "AutoDeafen: OFF",
+			now ? NotificationIcon::Success : NotificationIcon::Error,
+			1.f
+		)->show();
+	}
+
+#ifdef GEODE_IS_WINDOWS
+	inline bool isHeld(int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; }
+#endif
+
+	// Вызывается каждый кадр
+	inline void pollToggleBind() {
+#ifdef GEODE_IS_WINDOWS
+		static bool wasDown = false;
+
+		auto b = getBind("toggle-");
+		if (!b.key) { wasDown = false; return; }
+
+		// реагируем, только если окно игры активно
+		DWORD pid = 0;
+		GetWindowThreadProcessId(GetForegroundWindow(), &pid);
+		if (pid != GetCurrentProcessId()) { wasDown = false; return; }
+
+		bool down = isHeld(b.key)
+			&& isHeld(VK_CONTROL) == b.ctrl
+			&& isHeld(VK_SHIFT) == b.shift
+			&& isHeld(VK_MENU) == b.alt;
+
+		if (down && !wasDown) toggleEnabled();
+		wasDown = down;
+#endif
+	}
+
+	// ---------- стартпосы ----------
+	struct StartposInfo {
+		std::string levelKey;
+		int count = 0;
+		int current = -1; // индекс стартпоса, с которого запущен уровень (-1 = с начала)
+	};
+
+	// Стартпосы нумеруются слева направо (по X)
+	inline StartposInfo startposInfo(PlayLayer* pl) {
+		StartposInfo info;
+		if (!pl || !pl->m_level) return info;
+
+		int id = pl->m_level->m_levelID.value();
+		info.levelKey = id != 0 ? std::to_string(id) : std::string(pl->m_level->m_levelName);
+
+		std::vector<GameObject*> sps;
+		if (pl->m_objects) {
+			for (auto obj : CCArrayExt<GameObject*>(pl->m_objects)) {
+				if (obj && obj->m_objectID == 31) sps.push_back(obj);
+			}
+		}
+		std::sort(sps.begin(), sps.end(), [](GameObject* a, GameObject* b) {
+			return a->getPositionX() < b->getPositionX();
+		});
+
+		info.count = static_cast<int>(sps.size());
+		if (pl->m_startPosObject) {
+			for (int i = 0; i < info.count; i++) {
+				if (sps[i] == pl->m_startPosObject) { info.current = i; break; }
+			}
+		}
+		return info;
+	}
+
+	inline std::string startposKey(std::string const& levelKey, int idx) {
+		return "sp:" + levelKey + ":" + std::to_string(idx);
+	}
+
+	// Процент deafen для данного стартпоса (или общий, если свой не задан)
+	inline int deafenPercentFor(std::string const& levelKey, int idx) {
+		if (idx < 0) return percent();
+		int v = Mod::get()->getSavedValue<int>(startposKey(levelKey, idx), -1);
+		return v >= 0 ? v : percent();
+	}
+
+	inline void setStartposPercent(std::string const& levelKey, int idx, int value) {
+		Mod::get()->setSavedValue<int>(startposKey(levelKey, idx), value);
+	}
+
+	// ---------- расстановка кнопки в меню паузы ----------
+	inline CCRect worldRect(CCNode* n) {
+		auto bb = n->boundingBox();
+		auto p = n->getParent();
+		if (!p) return bb;
+		auto o = p->convertToWorldSpace(bb.origin);
+		auto e = p->convertToWorldSpace({bb.origin.x + bb.size.width, bb.origin.y + bb.size.height});
+		return CCRect(o.x, o.y, e.x - o.x, e.y - o.y);
+	}
+
+	inline void collectItems(CCNode* node, CCNode* ignore, std::vector<CCRect>& out) {
+		if (!node || node == ignore || !node->isVisible()) return;
+
+		if (typeinfo_cast<CCMenuItem*>(node)) {
+			auto r = worldRect(node);
+			// огромные невидимые элементы не считаем
+			if (r.size.width > 0.f && r.size.height > 0.f && r.size.width < 160.f && r.size.height < 160.f) {
+				out.push_back(r);
+			}
+		}
+
+		auto children = node->getChildren();
+		if (!children) return;
+		for (auto child : CCArrayExt<CCNode*>(children)) {
+			collectItems(child, ignore, out);
+		}
+	}
+
+	// Ищет свободное место справа сверху (потом по верхнему краю, потом слева)
+	inline void placeButton(CCNode* layer, CCNode* menu) {
+		auto win = CCDirector::get()->getWinSize();
+
+		std::vector<CCRect> others;
+		collectItems(layer, menu, others);
+
+		const float half = 19.f;
+		auto isFree = [&](CCPoint p) {
+			CCRect r(p.x - half, p.y - half, half * 2.f, half * 2.f);
+			for (auto const& o : others) {
+				if (r.intersectsRect(o)) return false;
+			}
+			return true;
+		};
+
+		std::vector<CCPoint> candidates;
+		for (float y = win.height - 37.f; y > 60.f; y -= 38.f) candidates.push_back({win.width - 37.f, y});
+		for (float x = win.width - 75.f; x > 40.f; x -= 38.f) candidates.push_back({x, win.height - 37.f});
+		for (float y = win.height - 37.f; y > 60.f; y -= 38.f) candidates.push_back({37.f, y});
+
+		CCPoint chosen = {win.width - 37.f, win.height - 75.f};
+		for (auto const& c : candidates) {
+			if (isFree(c)) { chosen = c; break; }
+		}
+		menu->setPosition(layer->convertToNodeSpace(chosen));
+	}
 }
 
 // ============================================================
-//  Попап настроек
+//  Окно: проценты для каждого стартпоса
+// ============================================================
+class StartposPopup : public Popup {
+protected:
+	ad::StartposInfo m_info;
+	int m_index = 0;
+	bool m_refreshing = false;
+	CCLabelBMFont* m_indexLabel = nullptr;
+	TextInput* m_input = nullptr;
+
+	bool init() {
+		if (!Popup::init(280.f, 210.f)) return false;
+		this->setTitle("Startpos percents");
+
+		m_info = ad::startposInfo(PlayLayer::get());
+
+		if (m_info.count <= 0) {
+			auto none = CCLabelBMFont::create("No startpos in this level", "chatFont.fnt");
+			m_mainLayer->addChildAtPosition(none, Anchor::Center, {0.f, 0.f});
+			return true;
+		}
+
+		m_index = m_info.current >= 0 ? m_info.current : 0;
+
+		// --- стрелки и номер стартпоса ---
+		auto leftSpr = CCSprite::createWithSpriteFrameName("GJ_arrow_01_001.png");
+		leftSpr->setScale(0.8f);
+		auto leftBtn = CCMenuItemSpriteExtra::create(leftSpr, this, menu_selector(StartposPopup::onPrev));
+		m_buttonMenu->addChildAtPosition(leftBtn, Anchor::Center, {-100.f, 40.f});
+
+		auto rightSpr = CCSprite::createWithSpriteFrameName("GJ_arrow_01_001.png");
+		rightSpr->setFlipX(true);
+		rightSpr->setScale(0.8f);
+		auto rightBtn = CCMenuItemSpriteExtra::create(rightSpr, this, menu_selector(StartposPopup::onNext));
+		m_buttonMenu->addChildAtPosition(rightBtn, Anchor::Center, {100.f, 40.f});
+
+		m_indexLabel = CCLabelBMFont::create("", "bigFont.fnt");
+		m_indexLabel->setScale(0.5f);
+		m_mainLayer->addChildAtPosition(m_indexLabel, Anchor::Center, {0.f, 40.f});
+
+		// --- процент ---
+		auto label = CCLabelBMFont::create("Deafen at", "chatFont.fnt");
+		label->setAnchorPoint({0.f, 0.5f});
+		label->setScale(0.9f);
+		m_mainLayer->addChildAtPosition(label, Anchor::Center, {-88.f, -5.f});
+
+		m_input = TextInput::create(60.f, "0-100", "bigFont.fnt");
+		m_input->setFilter("0123456789");
+		m_input->setMaxCharCount(3);
+		m_input->setCallback([this](std::string const& text) {
+			if (m_refreshing || text.empty()) return;
+			int v = 0;
+			try { v = std::stoi(text); } catch (...) { return; }
+			v = std::clamp(v, 0, 100);
+			ad::setStartposPercent(m_info.levelKey, m_index, v);
+		});
+		m_mainLayer->addChildAtPosition(m_input, Anchor::Center, {45.f, -5.f});
+
+		auto sign = CCLabelBMFont::create("%", "bigFont.fnt");
+		sign->setScale(0.6f);
+		m_mainLayer->addChildAtPosition(sign, Anchor::Center, {92.f, -5.f});
+
+		// --- сброс на общий процент ---
+		auto resetSpr = ButtonSprite::create("Use default", 120, true, "bigFont.fnt", "GJ_button_01.png", 30.f, 0.6f);
+		auto resetBtn = CCMenuItemSpriteExtra::create(resetSpr, this, menu_selector(StartposPopup::onReset));
+		m_buttonMenu->addChildAtPosition(resetBtn, Anchor::Center, {0.f, -55.f});
+
+		this->refresh();
+		return true;
+	}
+
+	void refresh() {
+		m_refreshing = true;
+
+		std::string text = "Startpos " + std::to_string(m_index + 1) + "/" + std::to_string(m_info.count);
+		if (m_index == m_info.current) text += " (now)";
+		m_indexLabel->setString(text.c_str());
+
+		m_input->setString(std::to_string(ad::deafenPercentFor(m_info.levelKey, m_index)));
+
+		m_refreshing = false;
+	}
+
+	void onPrev(CCObject*) {
+		m_index = (m_index - 1 + m_info.count) % m_info.count;
+		this->refresh();
+	}
+
+	void onNext(CCObject*) {
+		m_index = (m_index + 1) % m_info.count;
+		this->refresh();
+	}
+
+	void onReset(CCObject*) {
+		ad::setStartposPercent(m_info.levelKey, m_index, -1);
+		this->refresh();
+	}
+
+public:
+	static StartposPopup* create() {
+		auto ret = new StartposPopup();
+		if (ret->init()) {
+			ret->autorelease();
+			return ret;
+		}
+		CC_SAFE_DELETE(ret);
+		return nullptr;
+	}
+};
+
+// ============================================================
+//  Главное окно настроек
 // ============================================================
 class AutoDeafenPopup : public Popup {
 protected:
-	ButtonSprite* m_keySpr = nullptr;
-	bool m_capturing = false;
+	enum class Capture { None, Discord, Toggle };
+
+	ButtonSprite* m_discordSpr = nullptr;
+	ButtonSprite* m_toggleSpr = nullptr;
+	Capture m_capture = Capture::None;
 
 	// Подпись слева (только латиница: шрифт chatFont не поддерживает кириллицу)
 	void addLabel(char const* text, float y) {
@@ -152,63 +415,78 @@ protected:
 		m_mainLayer->addChildAtPosition(sign, Anchor::Center, {92.f, y});
 	}
 
+	CCMenuItemToggler* addToggler(float y, bool value, SEL_MenuHandler handler) {
+		auto toggler = CCMenuItemToggler::createWithStandardSprites(this, handler, 0.7f);
+		toggler->toggle(value);
+		m_buttonMenu->addChildAtPosition(toggler, Anchor::Center, {-110.f, y});
+		return toggler;
+	}
+
+	std::string toggleBindText() {
+		if (m_capture == Capture::Toggle) return "Press a key...";
+		return "Toggle: " + ad::bindToString(ad::getBind("toggle-"));
+	}
+
+	std::string discordBindText() {
+		if (m_capture == Capture::Discord) return "Press a key...";
+		return "Key: " + ad::bindToString(ad::getBind(""));
+	}
+
 	bool init() {
-		if (!Popup::init(300.f, 300.f)) return false;
+		if (!Popup::init(300.f, 310.f)) return false;
 		this->setTitle("Mario Auto Deafen");
 		this->setKeyboardEnabled(true);
 
 		// --- Enabled ---
-		auto toggler = CCMenuItemToggler::createWithStandardSprites(
-			this, menu_selector(AutoDeafenPopup::onToggle), 0.7f
-		);
-		toggler->toggle(ad::enabled());
-		m_buttonMenu->addChildAtPosition(toggler, Anchor::Center, {-110.f, 95.f});
-		this->addLabel("Enabled", 95.f);
+		this->addToggler(105.f, ad::enabled(), menu_selector(AutoDeafenPopup::onToggle));
+		this->addLabel("Enabled", 105.f);
 
-		// --- Клавиша ---
-		m_keySpr = ButtonSprite::create(
-			("Key: " + ad::bindToString(ad::getBind())).c_str(),
-			190, true, "bigFont.fnt", "GJ_button_04.png", 30.f, 0.6f
+		// --- Клавиша вкл/выкл мода ---
+		m_toggleSpr = ButtonSprite::create(
+			this->toggleBindText().c_str(), 190, true, "bigFont.fnt", "GJ_button_04.png", 30.f, 0.6f
 		);
-		auto keyBtn = CCMenuItemSpriteExtra::create(m_keySpr, this, menu_selector(AutoDeafenPopup::onKeyBtn));
-		m_buttonMenu->addChildAtPosition(keyBtn, Anchor::Center, {0.f, 60.f});
+		auto toggleBtn = CCMenuItemSpriteExtra::create(m_toggleSpr, this, menu_selector(AutoDeafenPopup::onToggleBindBtn));
+		m_buttonMenu->addChildAtPosition(toggleBtn, Anchor::Center, {0.f, 70.f});
+
+		// --- Клавиша Discord ---
+		m_discordSpr = ButtonSprite::create(
+			this->discordBindText().c_str(), 190, true, "bigFont.fnt", "GJ_button_04.png", 30.f, 0.6f
+		);
+		auto discordBtn = CCMenuItemSpriteExtra::create(m_discordSpr, this, menu_selector(AutoDeafenPopup::onDiscordBtn));
+		m_buttonMenu->addChildAtPosition(discordBtn, Anchor::Center, {0.f, 36.f});
 
 		// --- Процент, с которого включается deafen ---
-		this->addLabel("Deafen at", 20.f);
-		this->addPercentInput(20.f, "percent", ad::percent());
+		this->addLabel("Deafen at", -2.f);
+		this->addPercentInput(-2.f, "percent", ad::percent());
 
 		// --- Процент, на котором звук возвращается (по желанию) ---
-		auto undeafenToggler = CCMenuItemToggler::createWithStandardSprites(
-			this, menu_selector(AutoDeafenPopup::onToggleUndeafen), 0.7f
-		);
-		undeafenToggler->toggle(ad::undeafenEnabled());
-		m_buttonMenu->addChildAtPosition(undeafenToggler, Anchor::Center, {-110.f, -20.f});
-		this->addLabel("Undeafen at", -20.f);
-		this->addPercentInput(-20.f, "undeafen-percent", ad::undeafenPercent());
+		this->addToggler(-36.f, ad::undeafenEnabled(), menu_selector(AutoDeafenPopup::onToggleUndeafen));
+		this->addLabel("Undeafen at", -36.f);
+		this->addPercentInput(-36.f, "undeafen-percent", ad::undeafenPercent());
 
 		// --- Работать со стартпосов ---
-		auto startposToggler = CCMenuItemToggler::createWithStandardSprites(
-			this, menu_selector(AutoDeafenPopup::onToggleStartpos), 0.7f
-		);
-		startposToggler->toggle(ad::startposEnabled());
-		m_buttonMenu->addChildAtPosition(startposToggler, Anchor::Center, {-110.f, -60.f});
-		this->addLabel("Deafen on startpos", -60.f);
+		this->addToggler(-70.f, ad::startposEnabled(), menu_selector(AutoDeafenPopup::onToggleStartpos));
+		this->addLabel("Deafen on startpos", -70.f);
 
-		// --- Тест ---
+		// --- Нижний ряд кнопок ---
+		auto spSpr = ButtonSprite::create("Startpos %", 110, true, "bigFont.fnt", "GJ_button_01.png", 30.f, 0.6f);
+		auto spBtn = CCMenuItemSpriteExtra::create(spSpr, this, menu_selector(AutoDeafenPopup::onStartposList));
+		m_buttonMenu->addChildAtPosition(spBtn, Anchor::Center, {-65.f, -113.f});
+
 		auto testSpr = ButtonSprite::create("Test key", 100, true, "bigFont.fnt", "GJ_button_01.png", 30.f, 0.6f);
 		auto testBtn = CCMenuItemSpriteExtra::create(testSpr, this, menu_selector(AutoDeafenPopup::onTest));
-		m_buttonMenu->addChildAtPosition(testBtn, Anchor::Center, {0.f, -110.f});
+		m_buttonMenu->addChildAtPosition(testBtn, Anchor::Center, {70.f, -113.f});
 
 		return true;
 	}
 
-	void refreshKey() {
-		if (m_capturing) m_keySpr->setString("Press a key...");
-		else m_keySpr->setString(("Key: " + ad::bindToString(ad::getBind())).c_str());
+	void refreshKeys() {
+		m_toggleSpr->setString(this->toggleBindText().c_str());
+		m_discordSpr->setString(this->discordBindText().c_str());
 	}
 
+	// toggler вызывает callback ДО смены состояния, поэтому значение инвертируем
 	void onToggle(CCObject* sender) {
-		// toggler вызывает callback ДО смены состояния, поэтому инвертируем
 		auto t = static_cast<CCMenuItemToggler*>(sender);
 		Mod::get()->setSavedValue<bool>("enabled", !t->isToggled());
 	}
@@ -223,18 +501,27 @@ protected:
 		Mod::get()->setSavedValue<bool>("startpos", !t->isToggled());
 	}
 
-	void onKeyBtn(CCObject*) {
-		m_capturing = !m_capturing;
-		this->refreshKey();
+	void onToggleBindBtn(CCObject*) {
+		m_capture = (m_capture == Capture::Toggle) ? Capture::None : Capture::Toggle;
+		this->refreshKeys();
+	}
+
+	void onDiscordBtn(CCObject*) {
+		m_capture = (m_capture == Capture::Discord) ? Capture::None : Capture::Discord;
+		this->refreshKeys();
+	}
+
+	void onStartposList(CCObject*) {
+		StartposPopup::create()->show();
 	}
 
 	void onTest(CCObject*) {
-		// Просто нажимает клавишу один раз (для проверки, что Discord реагирует)
+		// Просто нажимает клавишу Discord один раз (для проверки, что Discord реагирует)
 		ad::pressBind();
 	}
 
 	void handleKey(enumKeyCodes key) {
-		if (!m_capturing) return;
+		if (m_capture == Capture::None) return;
 
 		int vk = static_cast<int>(key);
 		// одни модификаторы не считаем клавишей
@@ -246,10 +533,10 @@ protected:
 		b.ctrl = kb->getControlKeyPressed();
 		b.shift = kb->getShiftKeyPressed();
 		b.alt = kb->getAltKeyPressed();
-		ad::setBind(b);
+		ad::setBind(m_capture == Capture::Toggle ? "toggle-" : "", b);
 
-		m_capturing = false;
-		this->refreshKey();
+		m_capture = Capture::None;
+		this->refreshKeys();
 	}
 
 public:
@@ -270,7 +557,7 @@ public:
 };
 
 // ============================================================
-//  Иконка в меню паузы (справа сверху)
+//  Иконка в меню паузы (сама ищет свободное место)
 // ============================================================
 class $modify(AutoDeafenPauseLayer, PauseLayer) {
 	void customSetup() {
@@ -296,14 +583,31 @@ class $modify(AutoDeafenPauseLayer, PauseLayer) {
 
 		auto menu = CCMenu::create();
 		menu->setID("autodeafen-menu"_spr);
-		// Справа сверху, ПОД шестерёнкой настроек
-		menu->setPosition({win.width - 37.f, win.height - 72.f});
+		menu->setPosition({win.width - 37.f, win.height - 75.f});
 		menu->addChild(btn);
 		this->addChild(menu);
+
+		// Кнопки других модов могут появиться чуть позже — проверяем несколько раз
+		this->schedule(schedule_selector(AutoDeafenPauseLayer::updateButtonPos), 0.25f, 3, 0.f);
+	}
+
+	void updateButtonPos(float) {
+		auto menu = this->getChildByID("autodeafen-menu"_spr);
+		if (menu) ad::placeButton(this, menu);
 	}
 
 	void onAutoDeafen(CCObject*) {
 		AutoDeafenPopup::create()->show();
+	}
+};
+
+// ============================================================
+//  Клавиша вкл/выкл мода (проверяется каждый кадр)
+// ============================================================
+class $modify(AutoDeafenScheduler, CCScheduler) {
+	void update(float dt) {
+		CCScheduler::update(dt);
+		ad::pollToggleBind();
 	}
 };
 
@@ -313,27 +617,44 @@ class $modify(AutoDeafenPauseLayer, PauseLayer) {
 class $modify(AutoDeafenPlayLayer, PlayLayer) {
 	struct Fields {
 		bool triggered = false; // уже сработало в этой попытке
+		int target = -1;        // процент deafen для этой попытки (-1 = ещё не посчитан)
 	};
+
+	void refreshTarget() {
+		auto info = ad::startposInfo(this);
+		int idx = m_startPosObject ? info.current : -1;
+		m_fields->target = ad::deafenPercentFor(info.levelKey, idx);
+	}
 
 	void postUpdate(float dt) {
 		PlayLayer::postUpdate(dt);
 
 		if (!ad::enabled()) return;
-		if (m_isTestMode) return;
-		if (m_startPosObject && !ad::startposEnabled()) return; // запуск со стартпоса
-		if (m_isPracticeMode && !Mod::get()->getSettingValue<bool>("practice-mode")) return;
+
+		bool fromStartpos = m_startPosObject != nullptr;
+		if (fromStartpos) {
+			// со стартпоса работаем, только если включено, и в любом режиме (в т.ч. практика)
+			if (!ad::startposEnabled()) return;
+		}
+		else {
+			if (m_isTestMode) return;
+			if (m_isPracticeMode && !Mod::get()->getSettingValue<bool>("practice-mode")) return;
+		}
+
+		if (m_fields->target < 0) this->refreshTarget();
 
 		float pct = this->getCurrentPercent();
 
 		if (!m_fields->triggered) {
 			// включаем deafen, когда дошли до нужного процента
-			if (pct >= static_cast<float>(ad::percent())) {
+			if (pct >= static_cast<float>(m_fields->target)) {
 				m_fields->triggered = true;
 				ad::deafen();
+				log::info("[AutoDeafen] deafen at {:.1f}% (target {}%, startpos: {})", pct, m_fields->target, fromStartpos);
 			}
 		}
 		else if (ad::g_deafened && ad::undeafenEnabled()
-			&& ad::undeafenPercent() > ad::percent()
+			&& ad::undeafenPercent() > m_fields->target
 			&& pct >= static_cast<float>(ad::undeafenPercent())) {
 			// возвращаем звук на втором проценте
 			ad::undeafen();
@@ -343,6 +664,7 @@ class $modify(AutoDeafenPlayLayer, PlayLayer) {
 	void resetLevel() {
 		ad::undeafen();
 		m_fields->triggered = false;
+		m_fields->target = -1;
 		PlayLayer::resetLevel();
 	}
 
