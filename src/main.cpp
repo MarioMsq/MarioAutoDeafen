@@ -246,12 +246,17 @@ class $modify(AutoDeafenPauseLayer, PauseLayer) {
 
 		auto win = CCDirector::get()->getWinSize();
 
+		// Надпись зелёная, если autodeafen включён, и серая, если выключен
 		auto label = CCLabelBMFont::create("AD", "bigFont.fnt");
+		label->setColor(ad::enabled() ? ccColor3B{110, 255, 110} : ccColor3B{190, 190, 190});
+
+		// Тёмно-фиолетовый кружок в стиле кнопок меню паузы, чуть меньше обычного
 		auto spr = CircleButtonSprite::create(
 			label,
-			ad::enabled() ? CircleBaseColor::Green : CircleBaseColor::Gray,
+			CircleBaseColor::DarkPurple,
 			CircleBaseSize::Medium
 		);
+		spr->setScale(0.7f);
 
 		auto btn = CCMenuItemSpriteExtra::create(
 			spr, this, menu_selector(AutoDeafenPauseLayer::onAutoDeafen)
@@ -259,7 +264,8 @@ class $modify(AutoDeafenPauseLayer, PauseLayer) {
 
 		auto menu = CCMenu::create();
 		menu->setID("autodeafen-menu"_spr);
-		menu->setPosition({win.width - 30.f, win.height - 30.f});
+		// Справа сверху, ПОД шестерёнкой настроек
+		menu->setPosition({win.width - 37.f, win.height - 72.f});
 		menu->addChild(btn);
 		this->addChild(menu);
 	}
