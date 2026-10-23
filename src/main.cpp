@@ -17,6 +17,7 @@
 #include <vector>
 #include <string>
 #include <algorithm>
+#include <cmath>
 
 using namespace geode::prelude;
 
@@ -618,6 +619,8 @@ class $modify(AutoDeafenPlayLayer, PlayLayer) {
 	struct Fields {
 		bool triggered = false; // уже сработало в этой попытке
 		int target = -1;        // процент deafen для этой попытки (-1 = ещё не посчитан)
+		StartPosObject* spObj = nullptr; // стартпос, для которого запомнен процент ниже
+		float spPct = 0.f;      // на каком проценте находится сам стартпос
 	};
 
 	void refreshTarget() {
@@ -644,6 +647,16 @@ class $modify(AutoDeafenPlayLayer, PlayLayer) {
 		if (m_fields->target < 0) this->refreshTarget();
 
 		float pct = this->getCurrentPercent();
+
+		if (fromStartpos) {
+			// запоминаем, на каком проценте стоит сам стартпос
+			if (m_startPosObject != m_fields->spObj) {
+				m_fields->spObj = m_startPosObject;
+				m_fields->spPct = pct;
+			}
+			// указанный процент меньше процента стартпоса — ничего не делаем
+			if (m_fields->target < static_cast<int>(std::floor(m_fields->spPct))) return;
+		}
 
 		if (!m_fields->triggered) {
 			// включаем deafen, когда дошли до нужного процента
