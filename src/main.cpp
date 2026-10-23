@@ -222,10 +222,21 @@ namespace ad {
 	inline void collectItems(CCNode* node, CCNode* ignore, std::vector<CCRect>& out) {
 		if (!node || node == ignore || !node->isVisible()) return;
 
+		bool relevant = false;
 		if (typeinfo_cast<CCMenuItem*>(node)) {
+			relevant = true;
+		}
+		else if (auto spr = typeinfo_cast<CCSprite*>(node)) {
+			relevant = spr->getOpacity() > 20; // почти прозрачные не считаем
+		}
+		else if (typeinfo_cast<CCLabelBMFont*>(node)) {
+			relevant = true;
+		}
+
+		if (relevant) {
 			auto r = worldRect(node);
-			// огромные невидимые элементы не считаем
-			if (r.size.width > 0.f && r.size.height > 0.f && r.size.width < 160.f && r.size.height < 160.f) {
+			// огромные элементы (фон, затемнение) и совсем крошечные не считаем
+			if (r.size.width > 6.f && r.size.height > 6.f && r.size.width < 120.f && r.size.height < 120.f) {
 				out.push_back(r);
 			}
 		}
@@ -588,8 +599,9 @@ class $modify(AutoDeafenPauseLayer, PauseLayer) {
 		menu->addChild(btn);
 		this->addChild(menu);
 
-		// Кнопки других модов могут появиться чуть позже — проверяем несколько раз
-		this->schedule(schedule_selector(AutoDeafenPauseLayer::updateButtonPos), 0.25f, 3, 0.f);
+		// Кнопки других модов могут появиться позже — проверяем постоянно, пока открыта пауза
+		this->updateButtonPos(0.f);
+		this->schedule(schedule_selector(AutoDeafenPauseLayer::updateButtonPos), 0.3f);
 	}
 
 	void updateButtonPos(float) {
@@ -618,10 +630,23 @@ class $modify(AutoDeafenScheduler, CCScheduler) {
 class $modify(AutoDeafenPlayLayer, PlayLayer) {
 	struct Fields {
 		bool triggered = false; // уже сработало в этой попытке
+		bool logged = false;    // отладочная строка в лог уже записана
 		int target = -1;        // процент deafen для этой попытки (-1 = ещё не посчитан)
-		StartPosObject* spObj = nullptr; // стартпос, для которого запомнен процент ниже
-		float spPct = 0.f;      // на каком проценте находится сам стартпос
 	};
+
+	// Процент прохождения, считая от начала уровня (не зависит от стартпоса)
+	float absolutePercent() {
+		if (m_levelLength > 0.f && m_player1) {
+			return std::clamp(m_player1->getPositionX() / m_levelLength * 100.f, 0.f, 100.f);
+		}
+		return this->getCurrentPercent();
+	}
+
+	// Процент, на котором стоит выбранный стартпос
+	float startposPercent() {
+		if (!m_startPosObject || m_levelLength <= 0.f) return 0.f;
+		return std::clamp(m_startPosObject->getPositionX() / m_levelLength * 100.f, 0.f, 100.f);
+	}
 
 	void refreshTarget() {
 		auto info = ad::startposInfo(this);
@@ -646,24 +671,26 @@ class $modify(AutoDeafenPlayLayer, PlayLayer) {
 
 		if (m_fields->target < 0) this->refreshTarget();
 
-		float pct = this->getCurrentPercent();
+		float pct = this->absolutePercent();
+		float sp = fromStartpos ? this->startposPercent() : 0.f;
 
-		if (fromStartpos) {
-			// запоминаем, на каком проценте стоит сам стартпос
-			if (m_startPosObject != m_fields->spObj) {
-				m_fields->spObj = m_startPosObject;
-				m_fields->spPct = pct;
-			}
-			// указанный процент меньше процента стартпоса — ничего не делаем
-			if (m_fields->target < static_cast<int>(std::floor(m_fields->spPct))) return;
+		if (!m_fields->logged) {
+			m_fields->logged = true;
+			log::info(
+				"[AutoDeafen] attempt: startpos={}, startposPct={:.1f}, levelPct={:.1f}, gdPct={:.1f}, target={}",
+				fromStartpos, sp, pct, this->getCurrentPercent(), m_fields->target
+			);
 		}
+
+		// со стартпоса: указанный процент меньше процента самого стартпоса — ничего не делаем
+		if (fromStartpos && m_fields->target < static_cast<int>(std::floor(sp))) return;
 
 		if (!m_fields->triggered) {
 			// включаем deafen, когда дошли до нужного процента
 			if (pct >= static_cast<float>(m_fields->target)) {
 				m_fields->triggered = true;
 				ad::deafen();
-				log::info("[AutoDeafen] deafen at {:.1f}% (target {}%, startpos: {})", pct, m_fields->target, fromStartpos);
+				log::info("[AutoDeafen] DEAFEN at {:.1f}% (target {}%, startpos: {})", pct, m_fields->target, fromStartpos);
 			}
 		}
 		else if (ad::g_deafened && ad::undeafenEnabled()
@@ -671,12 +698,14 @@ class $modify(AutoDeafenPlayLayer, PlayLayer) {
 			&& pct >= static_cast<float>(ad::undeafenPercent())) {
 			// возвращаем звук на втором проценте
 			ad::undeafen();
+			log::info("[AutoDeafen] UNDEAFEN at {:.1f}%", pct);
 		}
 	}
 
 	void resetLevel() {
 		ad::undeafen();
 		m_fields->triggered = false;
+		m_fields->logged = false;
 		m_fields->target = -1;
 		PlayLayer::resetLevel();
 	}
