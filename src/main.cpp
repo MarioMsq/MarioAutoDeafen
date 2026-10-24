@@ -42,6 +42,17 @@ namespace ad {
 	inline int undeafenPercent() { return Mod::get()->getSavedValue<int>("undeafen-percent", 80); }
 	inline bool startposEnabled() { return Mod::get()->getSavedValue<bool>("startpos", true); }
 
+	// Цвет надписи «AD» на кнопке в меню паузы: зелёный = включено, серый = выключено.
+	// Обновляется сразу при включении/выключении мода.
+	inline void refreshIndicator() {
+		auto scene = CCDirector::get()->getRunningScene();
+		if (!scene) return;
+		auto node = scene->getChildByIDRecursive("autodeafen-label"_spr);
+		if (auto lbl = typeinfo_cast<CCLabelBMFont*>(node)) {
+			lbl->setColor(enabled() ? ccColor3B{110, 255, 110} : ccColor3B{190, 190, 190});
+		}
+	}
+
 	// prefix "" = клавиша Discord, prefix "toggle-" = клавиша вкл/выкл мода
 	inline Bind getBind(std::string const& prefix) {
 		auto m = Mod::get();
@@ -126,6 +137,7 @@ namespace ad {
 		bool now = !enabled();
 		Mod::get()->setSavedValue<bool>("enabled", now);
 		if (!now) undeafen(); // выключили мод, пока звук отключён — возвращаем звук
+		refreshIndicator();
 		Notification::create(
 			now ? "AutoDeafen: ON" : "AutoDeafen: OFF",
 			now ? NotificationIcon::Success : NotificationIcon::Error,
@@ -207,6 +219,53 @@ namespace ad {
 
 	inline void setStartposPercent(std::string const& levelKey, int idx, int value) {
 		Mod::get()->setSavedValue<int>(startposKey(levelKey, idx), value);
+	}
+
+	// ---------- процент ровно такой, как показывает игра ----------
+	// В игре (2.2) процент считается не по простой формуле, поэтому берём число
+	// прямо из надписи с процентами в верхней части экрана.
+	inline float parsePercent(std::string text) {
+		if (text.empty() || text.back() != '%') return -1.f;
+		text.pop_back();
+		if (text.empty()) return -1.f;
+		for (char c : text) {
+			if (!((c >= '0' && c <= '9') || c == '.')) return -1.f;
+		}
+		try { return std::stof(text); } catch (...) { return -1.f; }
+	}
+
+	inline void searchPercentLabels(CCNode* node, std::vector<CCLabelBMFont*>& out) {
+		if (!node) return;
+		if (auto lbl = typeinfo_cast<CCLabelBMFont*>(node)) {
+			if (parsePercent(lbl->getString()) >= 0.f) out.push_back(lbl);
+		}
+		auto children = node->getChildren();
+		if (!children) return;
+		for (auto child : CCArrayExt<CCNode*>(children)) {
+			searchPercentLabels(child, out);
+		}
+	}
+
+	// Надпись с процентами: целиком "53%" (или "53.2%"), вверху экрана ближе к центру
+	inline CCLabelBMFont* findPercentLabel() {
+		auto scene = CCDirector::get()->getRunningScene();
+		if (!scene) return nullptr;
+
+		std::vector<CCLabelBMFont*> labels;
+		searchPercentLabels(scene, labels);
+
+		auto win = CCDirector::get()->getWinSize();
+		CCLabelBMFont* best = nullptr;
+		float bestScore = 1e9f;
+		for (auto lbl : labels) {
+			auto parent = lbl->getParent();
+			if (!parent) continue;
+			auto p = parent->convertToWorldSpace(lbl->getPosition());
+			if (p.y < win.height * 0.8f) continue;
+			float score = std::abs(p.x - win.width / 2.f);
+			if (score < bestScore) { bestScore = score; best = lbl; }
+		}
+		return best;
 	}
 
 	// ---------- расстановка кнопки в меню паузы ----------
@@ -500,7 +559,10 @@ protected:
 	// toggler вызывает callback ДО смены состояния, поэтому значение инвертируем
 	void onToggle(CCObject* sender) {
 		auto t = static_cast<CCMenuItemToggler*>(sender);
-		Mod::get()->setSavedValue<bool>("enabled", !t->isToggled());
+		bool now = !t->isToggled();
+		Mod::get()->setSavedValue<bool>("enabled", now);
+		if (!now) ad::undeafen(); // выключили мод, пока звук отключён — возвращаем звук
+		ad::refreshIndicator();
 	}
 
 	void onToggleUndeafen(CCObject* sender) {
@@ -579,6 +641,7 @@ class $modify(AutoDeafenPauseLayer, PauseLayer) {
 
 		// Надпись зелёная, если autodeafen включён, и серая, если выключен
 		auto label = CCLabelBMFont::create("AD", "bigFont.fnt");
+		label->setID("autodeafen-label"_spr);
 		label->setColor(ad::enabled() ? ccColor3B{110, 255, 110} : ccColor3B{190, 190, 190});
 
 		// Тёмно-фиолетовый кружок в стиле кнопок меню паузы, чуть меньше обычного
@@ -607,6 +670,7 @@ class $modify(AutoDeafenPauseLayer, PauseLayer) {
 	void updateButtonPos(float) {
 		auto menu = this->getChildByID("autodeafen-menu"_spr);
 		if (menu) ad::placeButton(this, menu);
+		ad::refreshIndicator();
 	}
 
 	void onAutoDeafen(CCObject*) {
@@ -629,20 +693,34 @@ class $modify(AutoDeafenScheduler, CCScheduler) {
 // ============================================================
 class $modify(AutoDeafenPlayLayer, PlayLayer) {
 	struct Fields {
-		bool triggered = false; // уже сработало в этой попытке
-		bool logged = false;    // отладочная строка в лог уже записана
-		int target = -1;        // процент deafen для этой попытки (-1 = ещё не посчитан)
+		bool triggered = false;   // уже сработало в этой попытке
+		bool logged = false;      // отладочная строка в лог уже записана
+		int target = -1;          // процент deafen для этой попытки (-1 = ещё не посчитан)
+		int frames = 0;           // сколько кадров прошло с начала попытки
+		GameObject* spObj = nullptr; // стартпос, для которого запомнен процент ниже
+		float spPct = 0.f;        // на каком проценте (как в игре) стоит этот стартпос
+		CCLabelBMFont* pctLabel = nullptr; // надпись с процентами в игре
 	};
 
-	// Процент прохождения, считая от начала уровня (не зависит от стартпоса)
+	// Процент из надписи в игре (-1, если надписи нет)
+	float shownPercent() {
+		if (!m_fields->pctLabel) m_fields->pctLabel = ad::findPercentLabel();
+		if (!m_fields->pctLabel) return -1.f;
+		return ad::parsePercent(m_fields->pctLabel->getString());
+	}
+
+	// Процент прохождения от начала уровня — такой же, как показывает игра
 	float absolutePercent() {
+		float shown = this->shownPercent();
+		if (shown >= 0.f) return shown;
+		// запасной вариант, если надпись с процентами скрыта
 		if (m_levelLength > 0.f && m_player1) {
 			return std::clamp(m_player1->getPositionX() / m_levelLength * 100.f, 0.f, 100.f);
 		}
 		return this->getCurrentPercent();
 	}
 
-	// Процент, на котором стоит выбранный стартпос
+	// Примерный процент стартпоса по его позиции (используется как запасной)
 	float startposPercent() {
 		if (!m_startPosObject || m_levelLength <= 0.f) return 0.f;
 		return std::clamp(m_startPosObject->getPositionX() / m_levelLength * 100.f, 0.f, 100.f);
@@ -657,6 +735,8 @@ class $modify(AutoDeafenPlayLayer, PlayLayer) {
 	void postUpdate(float dt) {
 		PlayLayer::postUpdate(dt);
 
+		m_fields->frames++;
+
 		if (!ad::enabled()) return;
 
 		bool fromStartpos = m_startPosObject != nullptr;
@@ -669,16 +749,30 @@ class $modify(AutoDeafenPlayLayer, PlayLayer) {
 			if (m_isPracticeMode && !Mod::get()->getSettingValue<bool>("practice-mode")) return;
 		}
 
+		// первые кадры попытки пропускаем: игра ещё не обновила надпись с процентами
+		if (m_fields->frames < 3) return;
+
 		if (m_fields->target < 0) this->refreshTarget();
 
 		float pct = this->absolutePercent();
-		float sp = fromStartpos ? this->startposPercent() : 0.f;
+
+		float sp = 0.f;
+		if (fromStartpos) {
+			// запоминаем процент стартпоса один раз для каждого стартпоса
+			if (m_startPosObject != m_fields->spObj) {
+				m_fields->spObj = m_startPosObject;
+				m_fields->spPct = std::max(pct, this->startposPercent());
+			}
+			sp = m_fields->spPct;
+		}
 
 		if (!m_fields->logged) {
 			m_fields->logged = true;
 			log::info(
-				"[AutoDeafen] attempt: startpos={}, startposPct={:.1f}, levelPct={:.1f}, gdPct={:.1f}, target={}",
-				fromStartpos, sp, pct, this->getCurrentPercent(), m_fields->target
+				"[AutoDeafen] attempt: startpos={}, startposPct={:.1f}, shownPct={:.1f}, calcPct={:.1f}, target={}",
+				fromStartpos, sp, this->shownPercent(),
+				m_levelLength > 0.f && m_player1 ? m_player1->getPositionX() / m_levelLength * 100.f : -1.f,
+				m_fields->target
 			);
 		}
 
@@ -707,6 +801,8 @@ class $modify(AutoDeafenPlayLayer, PlayLayer) {
 		m_fields->triggered = false;
 		m_fields->logged = false;
 		m_fields->target = -1;
+		m_fields->frames = 0;
+		m_fields->pctLabel = nullptr;
 		PlayLayer::resetLevel();
 	}
 
