@@ -18,6 +18,7 @@
 #include <string>
 #include <algorithm>
 #include <cmath>
+#include <cctype>
 
 using namespace geode::prelude;
 
@@ -40,6 +41,8 @@ namespace ad {
 	inline int percent() { return Mod::get()->getSavedValue<int>("percent", 50); }
 	inline bool undeafenEnabled() { return Mod::get()->getSavedValue<bool>("undeafen-enabled", false); }
 	inline int undeafenPercent() { return Mod::get()->getSavedValue<int>("undeafen-percent", 80); }
+	// Галочка «Autodeafen with hacks»: если включена, при любом читe в Eclipse autodeafen не работает
+	inline bool blockWithHacks() { return Mod::get()->getSavedValue<bool>("block-hacks", false); }
 
 	// Цвет надписи «AD» на кнопке в меню паузы: зелёный = включено, серый = выключено.
 	// Обновляется сразу при включении/выключении мода.
@@ -227,6 +230,69 @@ namespace ad {
 
 	inline void setStartposPercent(std::string const& levelKey, int idx, int value) {
 		Mod::get()->setSavedValue<int>(startposKey(levelKey, idx), value);
+	}
+
+	// ---------- чит-индикатор Eclipse ----------
+	inline std::string lowerStr(std::string s) {
+		std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
+			return static_cast<char>(std::tolower(c));
+		});
+		return s;
+	}
+
+	inline bool visibleInTree(CCNode* n) {
+		for (; n; n = n->getParent()) {
+			if (!n->isVisible()) return false;
+		}
+		return true;
+	}
+
+	inline bool tryGetColor(CCNode* n, ccColor3B& out) {
+		if (auto spr = typeinfo_cast<CCNodeRGBA*>(n)) { out = spr->getColor(); return true; }
+		if (auto lbl = typeinfo_cast<CCLabelBMFont*>(n)) { out = lbl->getColor(); return true; }
+		if (auto lay = typeinfo_cast<CCLayerRGBA*>(n)) { out = lay->getColor(); return true; }
+		return false;
+	}
+
+	// Цвет индикатора: первый заметно окрашенный (не белый и не серый) элемент внутри него
+	inline bool indicatorColor(CCNode* node, ccColor3B& out) {
+		if (!node) return false;
+		ccColor3B c;
+		if (tryGetColor(node, c)) {
+			int mx = std::max({static_cast<int>(c.r), static_cast<int>(c.g), static_cast<int>(c.b)});
+			int mn = std::min({static_cast<int>(c.r), static_cast<int>(c.g), static_cast<int>(c.b)});
+			if (mx - mn >= 60) { out = c; return true; }
+		}
+		auto children = node->getChildren();
+		if (!children) return false;
+		for (auto child : CCArrayExt<CCNode*>(children)) {
+			if (indicatorColor(child, out)) return true;
+		}
+		return false;
+	}
+
+	inline bool isGreen(ccColor3B const& c) {
+		return c.g > c.r + 60 && c.g > c.b + 60;
+	}
+
+	// Ищем узел чит-индикатора по ID (в названии есть "cheat"); заодно собираем ID узлов Eclipse для лога
+	inline void findCheatNode(CCNode* node, CCNode*& best, std::vector<std::string>& eclipseIds) {
+		if (!node) return;
+		auto id = lowerStr(node->getID());
+		if (!id.empty()) {
+			if (id.find("eclipse") != std::string::npos && eclipseIds.size() < 25) eclipseIds.push_back(id);
+			if (id.find("cheat") != std::string::npos) {
+				bool betterName = id.find("indicator") != std::string::npos;
+				if (!best || (betterName && lowerStr(best->getID()).find("indicator") == std::string::npos)) {
+					best = node;
+				}
+			}
+		}
+		auto children = node->getChildren();
+		if (!children) return;
+		for (auto child : CCArrayExt<CCNode*>(children)) {
+			findCheatNode(child, best, eclipseIds);
+		}
 	}
 
 	// ---------- процент ровно такой, как показывает игра ----------
@@ -530,7 +596,7 @@ protected:
 	}
 
 	bool init() {
-		if (!Popup::init(300.f, 280.f)) return false;
+		if (!Popup::init(300.f, 300.f)) return false;
 		this->setTitle("Mario Auto Deafen");
 		this->setKeyboardEnabled(true);
 
@@ -561,14 +627,18 @@ protected:
 		this->addLabel("Undeafen at", -46.f);
 		this->addPercentInput(-46.f, "undeafen-percent", ad::undeafenPercent());
 
+		// --- Autodeafen with hacks ---
+		this->addToggler(-80.f, ad::blockWithHacks(), menu_selector(AutoDeafenPopup::onToggleHacks));
+		this->addLabel("Autodeafen with hacks", -80.f);
+
 		// --- Нижний ряд кнопок ---
 		auto spSpr = ButtonSprite::create("Startpos %", 110, true, "bigFont.fnt", "GJ_button_01.png", 30.f, 0.6f);
 		auto spBtn = CCMenuItemSpriteExtra::create(spSpr, this, menu_selector(AutoDeafenPopup::onStartposList));
-		m_buttonMenu->addChildAtPosition(spBtn, Anchor::Center, {-65.f, -100.f});
+		m_buttonMenu->addChildAtPosition(spBtn, Anchor::Center, {-65.f, -120.f});
 
 		auto testSpr = ButtonSprite::create("Test key", 100, true, "bigFont.fnt", "GJ_button_01.png", 30.f, 0.6f);
 		auto testBtn = CCMenuItemSpriteExtra::create(testSpr, this, menu_selector(AutoDeafenPopup::onTest));
-		m_buttonMenu->addChildAtPosition(testBtn, Anchor::Center, {70.f, -100.f});
+		m_buttonMenu->addChildAtPosition(testBtn, Anchor::Center, {70.f, -120.f});
 
 		return true;
 	}
@@ -590,6 +660,11 @@ protected:
 	void onToggleUndeafen(CCObject* sender) {
 		auto t = static_cast<CCMenuItemToggler*>(sender);
 		Mod::get()->setSavedValue<bool>("undeafen-enabled", !t->isToggled());
+	}
+
+	void onToggleHacks(CCObject* sender) {
+		auto t = static_cast<CCMenuItemToggler*>(sender);
+		Mod::get()->setSavedValue<bool>("block-hacks", !t->isToggled());
 	}
 
 	void onToggleBindBtn(CCObject*) {
@@ -721,6 +796,9 @@ class $modify(AutoDeafenPlayLayer, PlayLayer) {
 		std::string levelKey;     // ключ уровня для сохранённых настроек
 		int spIdx = -1;           // номер стартпоса (-1 = запуск с начала уровня)
 		bool spOn = false;        // включён ли мут на этом стартпосе
+		Ref<CCNode> cheatNode;    // чит-индикатор Eclipse
+		int cheatSearchAt = -1000; // на каком кадре в последний раз искали индикатор
+		bool cheatLogged = false; // информация об индикаторе уже записана в лог
 	};
 
 	// Процент из надписи в игре (-1, если надписи нет)
@@ -762,6 +840,46 @@ class $modify(AutoDeafenPlayLayer, PlayLayer) {
 		m_fields->spOn = m_fields->spIdx >= 0 && ad::startposOn(m_fields->levelKey, m_fields->spIdx);
 	}
 
+	// Включён ли хотя бы один чит в Eclipse (индикатор горит не зелёным)
+	bool hacksActive() {
+		if (!Loader::get()->isModLoaded("eclipse.eclipse-menu")) return false;
+
+		// индикатор мог быть удалён из сцены — тогда ищем заново
+		if (m_fields->cheatNode.data() && !m_fields->cheatNode->getParent()) {
+			m_fields->cheatNode = nullptr;
+		}
+
+		// пока не нашли, ищем примерно раз в секунду
+		if (!m_fields->cheatNode.data() && m_fields->frames - m_fields->cheatSearchAt >= 60) {
+			m_fields->cheatSearchAt = m_fields->frames;
+			CCNode* best = nullptr;
+			std::vector<std::string> ids;
+			ad::findCheatNode(CCDirector::get()->getRunningScene(), best, ids);
+			if (best) {
+				m_fields->cheatNode = best;
+			}
+			else if (!m_fields->cheatLogged) {
+				m_fields->cheatLogged = true;
+				std::string list;
+				for (auto const& id : ids) list += id + "; ";
+				log::info("[AutoDeafen] cheat indicator not found. Eclipse nodes: {}", list.empty() ? "none" : list);
+			}
+		}
+
+		auto node = m_fields->cheatNode.data();
+		if (!node || !ad::visibleInTree(node)) return false;
+
+		ccColor3B c;
+		if (!ad::indicatorColor(node, c)) return false;
+
+		bool green = ad::isGreen(c);
+		if (!m_fields->cheatLogged) {
+			m_fields->cheatLogged = true;
+			log::info("[AutoDeafen] cheat indicator '{}': color=({}, {}, {}), green={}", node->getID(), c.r, c.g, c.b, green);
+		}
+		return !green;
+	}
+
 	void postUpdate(float dt) {
 		PlayLayer::postUpdate(dt);
 
@@ -778,6 +896,12 @@ class $modify(AutoDeafenPlayLayer, PlayLayer) {
 
 		// первые кадры попытки пропускаем: игра ещё не обновила надпись с процентами
 		if (m_fields->frames < 3) return;
+
+		// включена галочка «Autodeafen with hacks» и в Eclipse горит чит-индикатор — мод не работает
+		if (ad::blockWithHacks() && this->hacksActive()) {
+			ad::undeafen(); // если звук уже был отключён — возвращаем
+			return;
+		}
 
 		this->refreshTarget();
 
